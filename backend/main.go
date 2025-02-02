@@ -1,9 +1,14 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"log"
 	"regexp"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/driver/sqlite"
@@ -12,10 +17,31 @@ import (
 
 type User struct {
 	gorm.Model
-	Username string `json:"username"`
+	Username  string `json:"username"`
+	PublicKey string `json:"public_key"`
 }
 
-const host = "https://localhost:3000"
+func generateKeyPair() (string, error) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return "", err
+	}
+
+	publicKey := &privateKey.PublicKey
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		return "", err
+	}
+
+	pubKeyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: pubKeyBytes,
+	})
+
+	return string(pubKeyPEM), nil
+}
+
+// const host = "https://localhost:3000"
 
 func main() {
 
@@ -28,6 +54,16 @@ func main() {
 	// Migrate the schema
 	db.AutoMigrate(&User{})
 
+	// publicKey, err := generateKeyPair()
+	// if err != nil {
+	// 	panic("failed to generate key pair")
+	// }
+
+	// db.Create(&User{
+	// 	Username:  "D41",
+	// 	PublicKey: publicKey,
+	// })
+
 	// db.Create(&User{Username: "D42"})
 
 	app := fiber.New()
@@ -35,6 +71,27 @@ func main() {
 		// return c.SendString("Hello, World!")
 		var user User
 		db.First(&user, 1) // find product with integer primary key
+		return c.JSON(fiber.Map{
+			"username": user.Username,
+		})
+	})
+
+	app.Get("/:username", func(c *fiber.Ctx) error {
+		username := c.Params("username")
+
+		// @を含むユーザー名からローカル部分を抽出
+		if parts := strings.Split(username, "@"); len(parts) > 1 {
+			username = parts[1]
+			fmt.Println(username)
+		}
+
+		var user User
+		if err := db.First(&user, "username = ?", username); err.Error != nil {
+			return c.JSON(fiber.Map{
+				"error": "user not found",
+			})
+		}
+		fmt.Println(user)
 		return c.JSON(fiber.Map{
 			"username": user.Username,
 		})
@@ -49,6 +106,8 @@ func main() {
 			})
 		}
 
+		host := c.Protocol() + "://" + c.Hostname()
+
 		c.Set("Content-Type", "application/activity+json")
 		return c.JSON(fiber.Map{
 			"@context": []string{
@@ -56,20 +115,20 @@ func main() {
 				"https://w3id.org/security/v1",
 			},
 			"type": "Person",
-			"id":   host + "/users/" + username,
+			"id":   host + "/users/" + user.Username,
 			// "name":              username,
-			"preferredUsername": username,
+			"preferredUsername": user.Username,
 			"discoverable":      true, // ActivityPubの仕様外だが、これがないとMisskeyに認識してもらえない？
 			// "summary":           "This is a summary of " + username,
 			// "icon":              "https://example.com/icon.jpg",
-			"inbox":     host + "/users/" + username + "/inbox",
-			"outbox":    host + "/users/" + username + "/outbox",
-			"followers": host + "/users/" + username + "/followers",
-			"following": host + "/users/" + username + "/following",
+			"inbox":     host + "/users/" + user.Username + "/inbox",
+			"outbox":    host + "/users/" + user.Username + "/outbox",
+			"followers": host + "/users/" + user.Username + "/followers",
+			"following": host + "/users/" + user.Username + "/following",
 			"publicKey": fiber.Map{
-				"id":           host + "/users/" + username + "#main-key",
-				"owner":        host + "/users/" + username,
-				"publicKeyPem": "-----BEGIN PUBLIC KEY...END PUBLIC KEY-----",
+				"id":           host + "/users/" + user.Username + "#main-key",
+				"owner":        host + "/users/" + user.Username,
+				"publicKeyPem": user.PublicKey,
 			},
 		})
 	})
@@ -111,7 +170,8 @@ func main() {
 	})
 
 	wellKnown.Get("/webfinger", func(c *fiber.Ctx) error {
-		r, err := regexp.Compile("acct:([^@]+)@(.+)")
+		r, err := regexp.Compile(`^([^@]+)@(.+)$`)
+		// acct:username@domain
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -123,16 +183,23 @@ func main() {
 				"error": "resource parameter is required",
 			})
 		}
+		fmt.Println(resource)
+		matches := r.FindStringSubmatch(resource)
 
-		matches := r.FindStringSubmatch("acct:loc@localhost:3000")
-		var userName string
-		if len(matches) > 1 {
-			fmt.Println(matches[1]) // ユーザー名部分のみ出力
-			userName = matches[1]
-			// fmt.Println(matches[0]) // マッチした全体を出力
-		} else {
+		if len(matches) != 3 {
 			return c.JSON(fiber.Map{
-				"error": "invalid resource parameter",
+				"error": "invalid resource parameter format",
+			})
+		}
+
+		protocol := c.Protocol()
+		userName := matches[1]
+		domain := protocol + "://" + matches[2]
+		host := protocol + "://" + c.Hostname()
+		fmt.Println(userName, domain, host)
+		if domain != host {
+			return c.JSON(fiber.Map{
+				"error": "invalid domain",
 			})
 		}
 
