@@ -42,6 +42,13 @@ func main() {
 
 	app.Get("/users/:username", func(c *fiber.Ctx) error {
 		username := c.Params("username")
+		var user User
+		if err := db.First(&user, "username = ?", username); err.Error != nil {
+			return c.JSON(fiber.Map{
+				"error": "user not found",
+			})
+		}
+
 		c.Set("Content-Type", "application/activity+json")
 		return c.JSON(fiber.Map{
 			"@context": []string{
